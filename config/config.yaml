@@ -1,0 +1,18 @@
+artifacts_root: artifacts
+data_ingestion:
+  root_dir: "artifacts/data_ingestion"
+  source_url: "hiranomanabu/ransmap-2024-ransomware-behavioral-features"
+  local_data_directory: "artifacts/data_ingestion/RanSMAP"
+
+turbo_preprocessing:
+  input_dir: "artifacts/data_ingestion/archive (1)/RanSMAP/dataset/original"
+  output_dir: "artifacts/processed_results"
+  T_d:  1
+  T_window: 0.5
+  eps: 0.1
+
+
+output:
+  root: "artifacts/processed_results"
+  logs: "logs"
+
