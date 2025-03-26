@@ -5,14 +5,14 @@ data_ingestion:
   local_data_directory: "artifacts/data_ingestion/RanSMAP"
 
 turbo_preprocessing:
-  input_dir: "artifacts/data_ingestion/archive (1)/RanSMAP/dataset/original"
-  output_dir: "artifacts/processed_results"
+  input_dir: "/mnt/c/projet/PFE_projet/artifacts/data_ingestion/artifacts/data_ingestion/archive (1)/RanSMAP/dataset/original"
+  output_dir: "/home/rym/projet/clean_projet_pfe/artifacts/processed_results"
   T_d:  1
   T_window: 0.5
   eps: 0.1
 
 
 output:
-  root: "artifacts/processed_results"
+  root: "/home/rym/projet/clean_projet_pfe/artifacts/processed_results"
   logs: "logs"
 

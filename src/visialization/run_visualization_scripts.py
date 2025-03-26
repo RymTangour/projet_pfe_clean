@@ -4,12 +4,13 @@ import argparse
 import os
 import sys
 
+# Add the project root directory to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 def run_script(script_name):
-    
     args = sys.argv[1:]
-    
-    cmd = ["python", f"{script_name}.py"] + args
-    
+    # Construct the full path relative to the current script's directory
+    script_path = os.path.join(os.path.dirname(__file__), script_name)
+    cmd = ["python", f"{script_path}.py"] + args
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd)
 
@@ -48,7 +49,14 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     
     
-    scripts = [ "src/visialization/2D_embedding","src/visialization/3D_embedding","src/visialization/clustering_visualization","src/visialization/data_exploration","src/visialization/feature_analysis","src/visialization/pca_visualization"]
+    scripts = [
+    "2D_embedding",
+    "3D_embedding",
+    "clustering_visualization",
+    "data_exploration",
+    "feature_analysis",
+    "pca_visualization"
+                ]
 
     
     with multiprocessing.Pool(processes=len(scripts)) as pool:

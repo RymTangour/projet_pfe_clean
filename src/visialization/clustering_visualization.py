@@ -7,6 +7,19 @@ from sklearn.preprocessing import LabelEncoder
 import logging
 import argparse
 import warnings
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, LabelEncoder
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.metrics import silhouette_score, adjusted_rand_score, normalized_mutual_info_score, homogeneity_score, completeness_score
+from scipy.spatial.distance import pdist, squareform
+import matplotlib.colors as mcolors
+from collections import Counter
+
 from src import get_logger 
 from visualization_feature_processor import DataLoader , EnhancedVisualizer
 from run_visualization_scripts import parse_args
@@ -20,203 +33,137 @@ class Cluster(EnhancedVisualizer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
     
-    def plot_enhanced_hierarchical_clustering(self, features, labels=None, data_type='combined', 
-                                         n_clusters=None, output_file=None, 
-                                         linkage_method='ward', distance_metric='euclidean', 
-                                         try_optimal_clusters=True, max_clusters=12,
-                                         scale_method='robust'):
-        """
-        Create improved hierarchical clustering visualization with optimized parameters.
+    def _gpu_memory_efficient_preprocessing(self, features, labels=None, max_samples=5000, scale_method='robust'):
+        if max_samples is not None and max_samples < features.shape[0]:
+            indices = np.random.choice(features.shape[0], max_samples, replace=False)
+            features = features[indices]
+            labels = labels[indices] if labels is not None else None
+            self.logger.info(f"Sampled {max_samples} samples for processing")
         
-        Args:
-            features (numpy.ndarray): The feature matrix
-            labels (numpy.ndarray, optional): Labels for samples (actual classifications)
-            data_type (str): 'storage', 'memory', or 'combined'
-            n_clusters (int, optional): Number of clusters to highlight (if None, will be optimized)
-            output_file (str, optional): Path to save the figure
-            linkage_method (str): Method for hierarchical clustering ('ward','complete','average','single')
-            distance_metric (str): Distance metric ('euclidean','correlation','cosine','cityblock')
-            try_optimal_clusters (bool): Whether to try finding optimal number of clusters
-            max_clusters (int): Maximum number of clusters to try when optimizing
-            scale_method (str): Scaling method ('standard','robust','minmax','none')
-        """
-        self.logger.info(f"Creating enhanced hierarchical clustering for {data_type} data")
-        
-        # Handle NaN or Inf values
         if np.isnan(features).any() or np.isinf(features).any():
-            self.logger.warning(f"{data_type} data contains NaN or Inf values. Replacing with zeros.")
+            self.logger.warning("Data contains NaN or Inf values. Replacing with zeros.")
             features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Apply appropriate scaling
-        from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
-        if scale_method == 'standard':
-            self.logger.info("Using standard scaling")
-            scaler = StandardScaler()
-            preprocessed_features = scaler.fit_transform(features)
-        elif scale_method == 'robust':
-            self.logger.info("Using robust scaling (less sensitive to outliers)")
-            scaler = RobustScaler()
-            preprocessed_features = scaler.fit_transform(features)
-        elif scale_method == 'minmax':
-            self.logger.info("Using min-max scaling")
-            scaler = MinMaxScaler()
-            preprocessed_features = scaler.fit_transform(features)
-        else:
-            self.logger.info("No scaling applied")
-            preprocessed_features = features.copy()
+        scalers = {
+            'standard': StandardScaler(),
+            'robust': RobustScaler(),
+            'minmax': MinMaxScaler()
+        }
         
-        # Feature selection based on variance and correlation with labels
+        scaler = scalers.get(scale_method, StandardScaler())
+        preprocessed_features = scaler.fit_transform(features)
+        
         if preprocessed_features.shape[1] > 100:
-            self.logger.info(f"Selecting important features from {preprocessed_features.shape[1]} total")
-            
-            # Get high variance features
             variances = np.var(preprocessed_features, axis=0)
-            var_threshold = np.percentile(variances, 50)  # Keep top 50% by variance
+            var_threshold = np.percentile(variances, 50)
             high_var_indices = np.where(variances > var_threshold)[0]
             
-            # If we have labels, prioritize features that correlate with the labels
             if labels is not None and len(np.unique(labels)) > 1:
-                from sklearn.feature_selection import mutual_info_classif
+                numeric_labels = (LabelEncoder().fit_transform(labels) 
+                                  if not np.issubdtype(labels.dtype, np.number) 
+                                  else labels)
                 
-                # Convert labels to numeric if they are strings
-                if not np.issubdtype(labels.dtype, np.number):
-                    from sklearn.preprocessing import LabelEncoder
-                    label_encoder = LabelEncoder()
-                    numeric_labels = label_encoder.fit_transform(labels)
-                else:
-                    numeric_labels = labels
-                
-                # Calculate mutual information for each feature
                 mi_scores = mutual_info_classif(preprocessed_features, numeric_labels)
-                mi_threshold = np.percentile(mi_scores, 70)  # Keep top 30% by MI
+                mi_threshold = np.percentile(mi_scores, 70)
                 high_mi_indices = np.where(mi_scores > mi_threshold)[0]
                 
-                # Combine variance and MI feature sets
                 selected_indices = np.union1d(
-                    high_var_indices[:50],  # Top 50 by variance
-                    high_mi_indices[:50]    # Top 50 by MI
-                )
-                
-                # Limit to 100 features
-                if len(selected_indices) > 100:
-                    selected_indices = selected_indices[:100]
+                    high_var_indices[:50], 
+                    high_mi_indices[:50]
+                )[:100]
             else:
-                # Without labels, just use variance
                 selected_indices = high_var_indices[:100]
             
             selected_features = preprocessed_features[:, selected_indices]
-            self.logger.info(f"Selected {len(selected_indices)} features")
         else:
             selected_features = preprocessed_features
             selected_indices = np.arange(preprocessed_features.shape[1])
         
-        # Generate sample and feature labels
-        sample_numbers = [f"Sample_{i+1}" for i in range(features.shape[0])]
+        return selected_features, selected_indices, labels
+
+    def _gpu_optimal_cluster_search(self, features, labels, max_clusters=12):
+        numeric_labels = (LabelEncoder().fit_transform(labels) 
+                          if not np.issubdtype(labels.dtype, np.number) 
+                          else labels)
+        
+        n_unique_labels = len(np.unique(numeric_labels))
+        
+        min_k = max(2, n_unique_labels - 2)
+        max_k = min(max_clusters, n_unique_labels + 5)
+        
+        self.logger.info(f"Searching for optimal clusters between {min_k} and {max_k}")
+        
+        best_score, best_k = -1, None
+        
+        for k in range(min_k, max_k + 1):
+            try:
+                cluster_assignments = fcluster(
+                    linkage(features, method='ward'), 
+                    k, 
+                    criterion='maxclust'
+                )
+                
+                if np.min(np.bincount(cluster_assignments)) < 5:
+                    continue
+                
+                sil_score = silhouette_score(features, cluster_assignments)
+                ari_score = adjusted_rand_score(numeric_labels, cluster_assignments)
+                
+                combined_score = (0.3 * sil_score) + (0.7 * ari_score)
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_k = k
+            except Exception as e:
+                self.logger.warning(f"Cluster search error for k={k}: {e}")
+        
+        return best_k or n_unique_labels
+
+    def plot_enhanced_hierarchical_clustering(
+        self, 
+        features, 
+        labels=None, 
+        data_type='combined', 
+        n_clusters=None, 
+        output_file=None,
+        linkage_method='ward', 
+        distance_metric='euclidean', 
+        try_optimal_clusters=True, 
+        max_clusters=12,
+        scale_method='robust',
+        max_samples=5000
+    ):
+        torch.cuda.empty_cache()
+        
+        selected_features, selected_indices, labels = self._gpu_memory_efficient_preprocessing(
+            features, labels, max_samples, scale_method
+        )
+        
+        sample_numbers = [f"Sample_{i+1}" for i in range(selected_features.shape[0])]
         feature_numbers = [f"Feature_{i+1}" for i in range(features.shape[1])]
         selected_feature_numbers = [feature_numbers[i] for i in selected_indices]
         
-        # Determine appropriate distance metric and linkage method
-        valid_metrics = ['euclidean', 'correlation', 'cosine', 'cityblock', 'jaccard']
-        valid_methods = ['ward', 'complete', 'average', 'single']
+        if try_optimal_clusters and n_clusters is None and labels is not None:
+            n_clusters = self._gpu_optimal_cluster_search(selected_features, labels, max_clusters)
+            self.logger.info(f"Optimal clusters determined: {n_clusters}")
         
-        if distance_metric not in valid_metrics:
-            self.logger.warning(f"Invalid distance metric: {distance_metric}. Using euclidean.")
-            distance_metric = 'euclidean'
-            
-        if linkage_method not in valid_methods:
-            self.logger.warning(f"Invalid linkage method: {linkage_method}. Using ward.")
-            linkage_method = 'ward'
-        
-        # Some combinations aren't valid (ward only works with euclidean)
-        if linkage_method == 'ward' and distance_metric != 'euclidean':
-            self.logger.warning("Ward linkage only works with euclidean distance. Using euclidean.")
-            distance_metric = 'euclidean'
-        
-        # Compute distance matrix if needed
         if distance_metric != 'euclidean':
-            from scipy.spatial.distance import pdist, squareform
-            self.logger.info(f"Computing {distance_metric} distance matrix")
             dist_matrix = pdist(selected_features, metric=distance_metric)
             Z = linkage(dist_matrix, method=linkage_method)
         else:
-            self.logger.info(f"Computing linkage with method={linkage_method}")
-            Z = linkage(selected_features, method=linkage_method, metric=distance_metric)
+            Z = linkage(selected_features, method=linkage_method)
         
-        # Try to find optimal number of clusters if requested
-        if try_optimal_clusters and n_clusters is None and labels is not None:
-            from scipy.cluster.hierarchy import fcluster
-            from sklearn.metrics import silhouette_score, adjusted_rand_score, davies_bouldin_score
-            
-            # Convert labels to numeric if needed
-            if not np.issubdtype(labels.dtype, np.number):
-                from sklearn.preprocessing import LabelEncoder
-                label_encoder = LabelEncoder()
-                numeric_labels = label_encoder.fit_transform(labels)
-            else:
-                numeric_labels = labels
-                
-            n_unique_labels = len(np.unique(numeric_labels))
-            
-            # Define search range for clusters
-            min_k = max(2, n_unique_labels - 2)
-            max_k = min(max_clusters, n_unique_labels + 5)
-            
-            self.logger.info(f"Searching for optimal clusters between {min_k} and {max_k}")
-            
-            best_score = -1
-            best_k = None
-            best_silhouette = -1
-            
-            for k in range(min_k, max_k + 1):
-                cluster_assignments = fcluster(Z, k, criterion='maxclust')
-                
-                # Skip if any cluster is too small
-                min_size = np.min(np.bincount(cluster_assignments))
-                if min_size < 5:
-                    continue
-                    
-                # Calculate internal validation metric (silhouette)
-                try:
-                    sil_score = silhouette_score(selected_features, cluster_assignments)
-                except:
-                    sil_score = 0
-                    
-                # Calculate external validation metric (ARI with true labels)
-                ari_score = adjusted_rand_score(numeric_labels, cluster_assignments)
-                
-                # Combined score (weighted more toward matching actual labels)
-                combined_score = (0.3 * sil_score) + (0.7 * ari_score)
-                
-                if combined_score > best_score or (combined_score == best_score and sil_score > best_silhouette):
-                    best_score = combined_score
-                    best_silhouette = sil_score
-                    best_k = k
-                    
-            if best_k is not None:
-                self.logger.info(f"Optimal number of clusters: {best_k}")
-                n_clusters = best_k
-            else:
-                # Fallback to number of unique labels if optimization fails
-                n_clusters = n_unique_labels
-                self.logger.info(f"Using {n_clusters} clusters (based on number of unique labels)")
-        
-        # Create figure
         fig = plt.figure(figsize=(18, 14))
-        
-        # Set up the grid for the subplots - adding space for label bar
         gs = gridspec.GridSpec(3, 2, width_ratios=[4, 1], height_ratios=[1, 4, 0.5])
         
-        # Create subplots
         ax_dendrogram_top = plt.subplot(gs[0, 0])
         ax_dendrogram_left = plt.subplot(gs[1, 0])
         ax_heatmap = plt.subplot(gs[1, 1])
-        ax_labels = plt.subplot(gs[2, 0])  # New axis for the label bar
+        ax_labels = plt.subplot(gs[2, 0])
         
-        # Get the dendrogram's reordered indices
         dend_result = dendrogram(Z, no_plot=True)
         reordered_indices = dend_result['leaves']
         
-        # Plot the top dendrogram (rotated)
         dendrogram(
             Z,
             ax=ax_dendrogram_top,
@@ -230,7 +177,6 @@ class Cluster(EnhancedVisualizer):
         ax_dendrogram_top.set_xticks([])
         ax_dendrogram_top.set_xticklabels([])
         
-        # Plot the left dendrogram
         dendrogram(
             Z,
             ax=ax_dendrogram_left,
@@ -243,10 +189,8 @@ class Cluster(EnhancedVisualizer):
         ax_dendrogram_left.set_yticks([])
         ax_dendrogram_left.set_yticklabels([])
         
-        # Plot the feature heatmap
         heatmap_data = selected_features[reordered_indices, :]
         
-        # Use a better colormap for visualization
         im = ax_heatmap.imshow(
             heatmap_data,
             aspect='auto',
@@ -254,26 +198,20 @@ class Cluster(EnhancedVisualizer):
             interpolation='nearest'
         )
         
-        # Add feature numbers if there aren't too many
         if len(selected_feature_numbers) <= 20:
             ax_heatmap.set_xticks(np.arange(len(selected_feature_numbers)))
             ax_heatmap.set_xticklabels(selected_feature_numbers, rotation=90, fontsize=8)
         
-        # Add the colorbar
         plt.colorbar(im, ax=ax_heatmap)
         
-        # Add plot labels and title
         method_str = f" (Method: {linkage_method}, Distance: {distance_metric})"
         fig.suptitle(f'Hierarchical Clustering Dendrogram ({data_type.capitalize()} Data){method_str}', fontsize=16)
         ax_dendrogram_top.set_title('Sample Clustering', fontsize=12)
         ax_heatmap.set_title('Feature Values', fontsize=12)
         
-        # Cut the tree to get cluster assignments
         if n_clusters is not None:
-            from scipy.cluster.hierarchy import fcluster
             cluster_assignments = fcluster(Z, n_clusters, criterion='maxclust')
             
-            # Add horizontal line to denote clusters
             ax_dendrogram_top.axhline(
                 y=Z[-(n_clusters-1), 2],
                 color='r',
@@ -281,7 +219,7 @@ class Cluster(EnhancedVisualizer):
                 alpha=0.8
             )
             ax_dendrogram_top.text(
-                len(features)/2,
+                len(selected_features)/2,
                 Z[-(n_clusters-1), 2] + 0.1 * Z[-(n_clusters-1), 2],
                 f'{n_clusters} clusters',
                 color='r',
@@ -289,11 +227,8 @@ class Cluster(EnhancedVisualizer):
                 ha='center'
             )
         
-        # Plot the labels bar to show actual classifications vs. cluster assignments
         if labels is not None and len(np.unique(labels)) > 1:
-            # Convert labels to numeric if they are strings
             if not np.issubdtype(labels.dtype, np.number):
-                from sklearn.preprocessing import LabelEncoder
                 label_encoder = LabelEncoder()
                 numeric_labels = label_encoder.fit_transform(labels)
                 unique_labels = label_encoder.classes_
@@ -303,42 +238,31 @@ class Cluster(EnhancedVisualizer):
                 unique_labels = np.unique(labels)
                 label_names = [f"Class {label}" for label in unique_labels]
             
-            # Reorder labels according to dendrogram order
             reordered_labels = numeric_labels[reordered_indices]
             
-            # Create color maps
-            import matplotlib.colors as mcolors
             n_classes = len(unique_labels)
             class_cmap = plt.cm.get_cmap('tab20', n_classes) if n_classes <= 20 else plt.cm.get_cmap('nipy_spectral', n_classes)
             
-            # Plot the actual classifications as a color bar
             label_colors = [class_cmap(int(lbl)) for lbl in reordered_labels]
             ax_labels.imshow([reordered_labels], aspect='auto', cmap=class_cmap)
             ax_labels.set_title('Actual Classifications', fontsize=10)
             ax_labels.set_yticks([])
             
-            # Add cluster assignments if n_clusters is provided
             if n_clusters is not None:
-                # Add a subplot for cluster assignments
                 ax_clusters = plt.subplot(gs[2, 1])
                 
-                # Reorder cluster assignments according to dendrogram order
                 reordered_clusters = cluster_assignments[reordered_indices]
                 
-                # Plot the cluster assignments as a color bar
                 cluster_cmap = plt.cm.get_cmap('Paired', n_clusters) if n_clusters <= 12 else plt.cm.get_cmap('tab20', n_clusters)
-                ax_clusters.imshow([reordered_clusters - 1], aspect='auto', cmap=cluster_cmap)  # -1 to start from 0 for colormap
+                ax_clusters.imshow([reordered_clusters - 1], aspect='auto', cmap=cluster_cmap)
                 ax_clusters.set_title('Cluster Assignments', fontsize=10)
                 ax_clusters.set_yticks([])
                 
-                # Calculate overlap metrics
-                from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, homogeneity_score, completeness_score
                 ari = adjusted_rand_score(numeric_labels, cluster_assignments)
                 nmi = normalized_mutual_info_score(numeric_labels, cluster_assignments)
                 homogeneity = homogeneity_score(numeric_labels, cluster_assignments)
                 completeness = completeness_score(numeric_labels, cluster_assignments)
                 
-                # Add overlap metrics
                 plt.figtext(
                     0.5,
                     0.01,
@@ -350,10 +274,8 @@ class Cluster(EnhancedVisualizer):
                     bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', boxstyle='round,pad=0.5')
                 )
                 
-                # Create a legend for classes and clusters
                 from matplotlib.patches import Patch
                 
-                # If too many classes, create a more compact legend
                 if n_classes > 10:
                     n_cols = 3
                     fontsize = 8
@@ -366,27 +288,21 @@ class Cluster(EnhancedVisualizer):
                 cluster_legend_elements = [Patch(facecolor=cluster_cmap(i), label=f"Cluster {i+1}") 
                                         for i in range(n_clusters)]
                 
-                # Add legends
                 ax_labels.legend(handles=class_legend_elements, loc='upper left', 
                                 bbox_to_anchor=(0, -0.1), ncol=n_cols, fontsize=fontsize)
                 ax_clusters.legend(handles=cluster_legend_elements, loc='upper left', 
                                 bbox_to_anchor=(0, -0.1), ncol=min(5, n_clusters), fontsize=fontsize)
                 
-                # Add confusion matrix as text with class vs cluster distributions
-                from collections import Counter
                 class_cluster_dict = {}
                 
                 for cl in range(1, n_clusters + 1):
                     class_distribution = Counter(numeric_labels[cluster_assignments == cl])
-                    # Convert counter values to their actual class names
                     class_dist_names = {label_names[cls]: count for cls, count in class_distribution.items()}
                     class_cluster_dict[f"Cluster {cl}"] = class_dist_names
                 
-                # Format as string
                 cluster_class_text = "Cluster contents:\n"
                 for cluster, class_dist in class_cluster_dict.items():
                     total = sum(class_dist.values())
-                    # Get the top 3 classes by count
                     top_classes = sorted(class_dist.items(), key=lambda x: x[1], reverse=True)[:3]
                     top_str = ", ".join([f"{cls} ({count}/{total}, {count/total:.1%})" for cls, count in top_classes])
                     cluster_class_text += f"{cluster}: {top_str}\n"
@@ -401,7 +317,6 @@ class Cluster(EnhancedVisualizer):
                     bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', boxstyle='round,pad=0.5')
                 )
                 
-            # Count samples in each class
             class_counts = {label_names[i]: np.sum(numeric_labels == i) for i in range(len(unique_labels))}
             
             count_text = "\n".join([
@@ -418,11 +333,10 @@ class Cluster(EnhancedVisualizer):
                 bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', boxstyle='round,pad=0.5')
             )
             
-        # Add sample and feature description
         plt.figtext(
             0.98,
             0.02,
-            f"Data type: {data_type}\nSamples: {features.shape[0]}\nFeatures: {len(selected_indices)} selected of {features.shape[1]} total",
+            f"Data type: {data_type}\nSamples: {selected_features.shape[0]}\nFeatures: {len(selected_indices)} selected of {features.shape[1]} total",
             fontsize=9,
             ha='right',
             va='bottom',
@@ -442,7 +356,6 @@ class Cluster(EnhancedVisualizer):
             
         plt.close()
         
-        # Return results dictionary with all relevant information
         results = {
             'linkage_matrix': Z,
             'method': linkage_method,
@@ -461,8 +374,11 @@ class Cluster(EnhancedVisualizer):
                 'completeness': completeness
             }
         
+        torch.cuda.empty_cache()
+        
         return results
-    def plot_minimum_spanning_tree(self, features, labels=None, data_type='combined', output_file=None, use_gpu=True, max_samples=10000):
+
+    def plot_minimum_spanning_tree(self, features, labels=None, data_type='combined', output_file=None, use_gpu=True, max_samples=5000):
         """
         Create a minimum spanning tree visualization to show relationships between samples.
         GPU-optimized version with sample limiting to handle large datasets.
@@ -858,7 +774,8 @@ def main():
                                 linkage_method=method['linkage'],
                                 distance_metric=method['distance'],
                                 scale_method=scaling,
-                                output_file=output_file
+                                output_file=output_file,
+                                max_samples=5000  # Pass max_samples with default value 5000
                             )
                             
                             # Track best performing configuration
@@ -906,7 +823,8 @@ def main():
                             linkage_method=best_method,
                             distance_metric=best_distance,
                             scale_method=best_config['scaling'],
-                            output_file=final_output
+                            output_file=final_output,
+                            max_samples=5000  # Pass max_samples with default value 5000
                         )
         
         return 0

@@ -1,4 +1,5 @@
 import numpy as np
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
@@ -29,21 +30,18 @@ class Cluster(EnhancedVisualizer):
         
     def create_specialized_visualization(self, features, labels, plot_title, data_type, 
                                output_file=None, use_original_labels=False, method='tsne'):
-        """Create visualization with customized preprocessing per data type"""
-        # First check if features and labels have matching lengths
+       
         if len(features) != len(labels):
             self.logger.error(f"Mismatched lengths: features {len(features)}, labels {len(labels)}")
             raise ValueError("Features and labels must have the same length")
             
-        # Get initial shape
+       
         initial_shape = features.shape
         self.logger.info(f"Initial features shape: {initial_shape}, Labels length: {len(labels)}")
         
-        # Sample data if needed for performance
         features, labels = self.sample_data_if_needed(features, labels)
         self.logger.info(f"After sampling: Features shape: {features.shape}, Labels length: {len(labels)}")
         
-        # Apply specialized preprocessing based on data type
         if data_type == "storage":
             preprocessed_features, outlier_mask = self.preprocess_storage_features(features)
         elif data_type == "memory":
@@ -53,29 +51,25 @@ class Cluster(EnhancedVisualizer):
             self.logger.info(f"Combined data type: {data_type}. Using generic preprocessing.Rymm{preprocessed_features.shape}")
         else:
             self.logger.warning(f"Unknown data type: {data_type}. Using generic preprocessing.Rymm{preprocessed_features.shape}")
-            # Legacy preprocessing as fallback
             preprocessed_features, outlier_mask = self.preprocess_storage_features(features)
         
-        # If outliers were removed, also filter labels
         if outlier_mask is not None:
             labels = labels[outlier_mask]
             self.logger.info(f"After outlier removal: Features shape: {preprocessed_features.shape}, "
                         f"Labels length: {len(labels)}")
                         
-        # Generate embedding based on chosen method
         if method == 'tsne':
-            # Adjust t-SNE parameters based on data type
             if data_type == "memory":
-                perplexity = min(25, preprocessed_features.shape[0] - 1)  # Lower perplexity for memory
+                perplexity = min(25, preprocessed_features.shape[0] - 1)  
                 learning_rate = 150
-                early_exaggeration = 14.0  # Higher exaggeration for memory
-                n_iter = 3000  # More iterations for memory
+                early_exaggeration = 14.0  
+                n_iter = 3000 
             elif data_type == "combined":
                 perplexity = min(30, preprocessed_features.shape[0] - 1)
                 learning_rate = 180
                 early_exaggeration = 13.0
                 n_iter = 2800
-            else:  # storage or default
+            else:  
                 perplexity = min(self.perplexity, preprocessed_features.shape[0] - 1)
                 learning_rate = self.learning_rate
                 early_exaggeration = 12.0

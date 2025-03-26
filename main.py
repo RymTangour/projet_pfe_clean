@@ -9,7 +9,7 @@ from pathlib import Path
 from src import get_logger
 
 logger=get_logger()
-
+"""
 
 STAGE_NAME = "Data Ingestion"
 
@@ -34,4 +34,4 @@ try:
     logger.info(f"-----------------------------------------------------stage {STAGE_NAME} completed-----------------------------------------------------")
 except Exception as e:
     logger.exception(e)
-    raise e"""
+    raise e

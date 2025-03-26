@@ -19,9 +19,6 @@ class ConfigurationManager:
             local_data_directory=config.local_data_directory,           
         )
         return data_config
-    
-
-    
 
     def get_turbo_processor_config(self) -> TurboProcessorConfig:
         config = self.config.turbo_preprocessing

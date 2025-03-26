@@ -46,7 +46,9 @@ class TurboProcessor:
         )
                     
         
-                  
+              
+           
+            
         self.lba_variance_kernel = cp.ReductionKernel(
                 'float64 lba, float64 mean',
                 'float64 variance',
@@ -103,7 +105,6 @@ class TurboProcessor:
     def extract_lines(self, lines, t, T_window):
         if lines.size == 0:
             return lines
-        
 
         t=self.dtype(t)  
         T_window=self.dtype(T_window)
@@ -218,6 +219,9 @@ class TurboProcessor:
             
         return float(variance)
     def calculate_storage_feature(self, ata_read_gpu, ata_write_gpu, T_d, T_window, eps):
+        # Add debug logging
+        logging.debug(f"Storage data shapes - Read: {ata_read_gpu.shape}, Write: {ata_write_gpu.shape}")
+        
         t = 0
         XS = []
         
@@ -264,6 +268,10 @@ class TurboProcessor:
     
     def calculate_memory_feature(self, mem_read_gpu, mem_write_gpu, mem_rw_gpu, mem_exec_gpu, 
                             T_d, T_window, eps):
+        # Add debug logging
+        logging.debug(f"Memory data shapes - Read: {mem_read_gpu.shape}, Write: {mem_write_gpu.shape}")
+        logging.debug(f"Memory data shapes - RW: {mem_rw_gpu.shape}, Exec: {mem_exec_gpu.shape}")
+        
         t = 0
         XM = []
         lines_MR = self.read_all_lines(mem_read_gpu)
@@ -506,5 +514,8 @@ class TurboProcessor:
                 cp.get_default_memory_pool().free_all_blocks()
                 
         logging.info("All batches processed")
+
+
+
 
 
