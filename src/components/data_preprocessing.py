@@ -219,9 +219,6 @@ class TurboProcessor:
             
         return float(variance)
     def calculate_storage_feature(self, ata_read_gpu, ata_write_gpu, T_d, T_window, eps):
-        # Add debug logging
-        logging.debug(f"Storage data shapes - Read: {ata_read_gpu.shape}, Write: {ata_write_gpu.shape}")
-        
         t = 0
         XS = []
         
@@ -268,10 +265,6 @@ class TurboProcessor:
     
     def calculate_memory_feature(self, mem_read_gpu, mem_write_gpu, mem_rw_gpu, mem_exec_gpu, 
                             T_d, T_window, eps):
-        # Add debug logging
-        logging.debug(f"Memory data shapes - Read: {mem_read_gpu.shape}, Write: {mem_write_gpu.shape}")
-        logging.debug(f"Memory data shapes - RW: {mem_rw_gpu.shape}, Exec: {mem_exec_gpu.shape}")
-        
         t = 0
         XM = []
         lines_MR = self.read_all_lines(mem_read_gpu)
